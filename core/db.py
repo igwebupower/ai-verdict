@@ -182,6 +182,31 @@ CREATE TABLE IF NOT EXISTS model_catalog_cache (
     fetched_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS conversation_trials (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id INTEGER NOT NULL REFERENCES experiments(id) ON DELETE CASCADE,
+    model_id TEXT NOT NULL,
+    condition_id TEXT NOT NULL,
+    repetition INTEGER NOT NULL,
+    initial_prompt TEXT NOT NULL,
+    initial_response TEXT,
+    challenge_prompt TEXT NOT NULL,
+    final_response TEXT,
+    initial_response_id TEXT,
+    final_response_id TEXT,
+    initial_response_model TEXT,
+    final_response_model TEXT,
+    initial_cost_usd REAL,
+    final_cost_usd REAL,
+    initial_latency_ms INTEGER,
+    final_latency_ms INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending',
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    UNIQUE(experiment_id, model_id, condition_id, repetition)
+);
+
 CREATE INDEX IF NOT EXISTS idx_runs_experiment ON runs(experiment_id);
 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
 CREATE INDEX IF NOT EXISTS idx_evaluations_run ON evaluations(run_id);

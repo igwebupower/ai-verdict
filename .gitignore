@@ -5,6 +5,7 @@ __pycache__/
 *.pyc
 .env
 data/
+video_pipeline/
 .pytest_cache/
 .streamlit/secrets.toml
 *.egg-info/

@@ -5,12 +5,12 @@ A local, working application for running repeatable, auditable experiments again
 independent structured evaluator, human-reviewing that classification, and exporting an evidence-based
 report + YouTube production brief.
 
-Built for **The AI Verdict** YouTube channel, starting with *"Do LLMs Assume Nurses Are Women?"* - but the
-app itself is general-purpose, supporting more than one kind of study (`evaluation_domain` on each
-experiment selects which evaluator/schema/analysis/dashboard treatment applies). A second built-in
-experiment, *"The AI judge gave him a longer sentence,"* tests whether a sentencing recommendation changes
-when only the defendant's name or only his statement's dialect changes - see "Running the sentencing-bias
-sample experiment" below.
+Originally built to generate evidence for one video essay, starting with *"Do LLMs Assume Nurses Are
+Women?"* - but the app itself is general-purpose, supporting more than one kind of study
+(`evaluation_domain` on each experiment selects which evaluator/schema/analysis/dashboard treatment
+applies). A second built-in experiment, *"The AI judge gave him a longer sentence,"* tests whether a
+sentencing recommendation changes when only the defendant's name or only his statement's dialect changes -
+see "Running the sentencing-bias sample experiment" below.
 
 No conclusions are hardcoded anywhere. Every number shown on the dashboard, in the exported report, or in
 the video brief is computed from actually recorded model responses and their (human-reviewable)

@@ -19,6 +19,7 @@ sample size.
 """
 from __future__ import annotations
 
+import random
 import sqlite3
 from typing import Any
 
@@ -29,6 +30,20 @@ from core.export import _already_narrated_variant_names, _blockquote, _prose_lis
     _rank_variants_by_headline_rate, _speakable, _truncate_at_word, _variant_headline_rate, word_count
 
 CUSTODIAL_FIELD_SPECS: list[tuple[str, set]] = [("is_custodial", {True})]
+
+
+def _vary(experiment_id: int, key: str, options: list):
+    """Deterministically picks one of several hand-written, equivalent
+    phrasings for one narrative beat, seeded by (experiment_id, key).
+
+    The same experiment always regenerates the exact same script (stable
+    for caching and for tests that read specific numbers out of it), but
+    different experiments - and different beats within the same script -
+    land on different stock phrases instead of all reciting the same fixed
+    sentence. That repetition across every generated video, not any single
+    sentence on its own, is what makes a generated script read as AI-
+    written; this is what keeps it from happening."""
+    return random.Random(f"{experiment_id}:{key}").choice(options)
 
 # Display names for this experiment's known variants, so prose reads as
 # "Nigerian English" rather than the generic _speakable() fallback's
@@ -66,7 +81,9 @@ def _capitalize_first(s: str) -> str:
     return s[:1].upper() + s[1:] if s else s
 
 
-def _minor_models_sentence(minor_models: list[str], custodial_counts: "pd.Series") -> str:
+def _minor_models_sentence(
+    minor_models: list[str], custodial_counts: "pd.Series", experiment_id: int, context: str,
+) -> str:
     """Honest acknowledgement of any model(s) that recommended custody a
     handful of times but don't drive the headline pattern - never silently
     dropped from the narrative just because they complicate a clean "one
@@ -77,13 +94,26 @@ def _minor_models_sentence(minor_models: list[str], custodial_counts: "pd.Series
     for m in minor_models:
         c = int(custodial_counts[m])
         bits.append(f"`{m}` ({c} time{'s' if c != 1 else ''})")
-    return (
-        f" One other model, {_prose_list(bits)}, also recommended custody a handful of times - too few to "
-        f"say anything about a pattern there, but worth naming rather than quietly folding into 'never.'"
-        if len(minor_models) == 1 else
-        f" {_prose_list(bits)} also recommended custody a handful of times each - too few to say anything "
-        f"about a pattern, but worth naming rather than quietly folding into 'never.'"
-    )
+    names = _prose_list(bits)
+    if len(minor_models) == 1:
+        options = [
+            f" One other model, {names}, also recommended custody a handful of times - too few to say "
+            f"anything about a pattern there, but worth naming rather than quietly folding into 'never.'",
+            f" One exception: {names} recommended custody a couple of times too - not enough to be a "
+            f"pattern, but it didn't sit at a flat zero either, so it gets named rather than rounded away.",
+            f" {names} isn't quite silent either - a small number of custodial recommendations, too few "
+            f"to mean anything on its own, but real enough that it shouldn't just vanish into 'never.'",
+        ]
+    else:
+        options = [
+            f" {names} also recommended custody a handful of times each - too few to say anything about "
+            f"a pattern, but worth naming rather than quietly folding into 'never.'",
+            f" {names} weren't flat zeroes either - each picked up a small number of custodial "
+            f"recommendations, not enough to count as a pattern but too many to just round down to 'never.'",
+            f" A handful of custodial recommendations also came from {names} - not a pattern, but naming "
+            f"them beats quietly folding them into a tidier 'every other model stayed silent' story.",
+        ]
+    return _vary(experiment_id, f"minor_models:{context}", options)
 
 
 def _ordinal(n: int) -> str:
@@ -303,7 +333,7 @@ def generate_blog_post(
         P.append("")
         P.append(
             f"The other {len(silent_models)} models I tested never recommended custody at all, in any "
-            f"version of the case.{_minor_models_sentence(minor_models, custodial_counts)} So this isn't a "
+            f"version of the case.{_minor_models_sentence(minor_models, custodial_counts, experiment_id, 'post_opening')} So this isn't a "
             f"story about \"AI sentencing bias\" in general. It's a story about what happens when you "
             f"actually go looking for it instead of assuming you know what you'll find - and the answer, "
             f"this time, was stranger and more specific than the question I started with."
@@ -479,7 +509,7 @@ def generate_blog_post(
         P.append(
             f"Because it isn't, as a general claim. {silent_list} never once recommended custody for this "
             f"case, in any of {len(prompt_versions)} versions - their sentencing behaviour simply didn't "
-            f"move.{_minor_models_sentence(minor_models, custodial_counts)} The entire finding above belongs "
+            f"move.{_minor_models_sentence(minor_models, custodial_counts, experiment_id, 'post_act3')} The entire finding above belongs "
             f"to one model. If I'd only tested the other {n_models - 1}, this post wouldn't exist."
         )
         P.append("")
@@ -688,44 +718,127 @@ def generate_full_script(
     ordered_variants = [v for v in preferred_order if v in by_variant.index]
     ordered_variants += [v for v in by_variant.index if v not in preferred_order]
     baseline_pct = by_variant.loc["baseline", "custodial_pct"] if "baseline" in by_variant.index else None
-    low_variant = ranking.low_pv["variant_name"] if ranking.low_pv else "baseline"
+    # Rank variants by THIS model's own rates, not the pooled rate across
+    # every model - with several silent (always-zero) models in the mix,
+    # the pooled ranking is noise that can disagree with what the dominant
+    # model itself actually did, which is what the rest of this section
+    # narrates. A real regression: experiment 3's pooled-lowest variant was
+    # "name_nigerian" even though Haiku's own lowest variant was "baseline".
+    sole_ranking = _rank_variants_by_custodial_rate(sole, prompt_versions)
+    low_variant = sole_ranking.low_pv["variant_name"] if sole_ranking.low_pv else "baseline"
     low_rate, _ = _variant_custodial_rate(sole, low_variant)
+    sole_overall_rate = float(sole["is_custodial"].sum()) / len(sole) if len(sole) else 0.0
 
     # ---------------- COLD OPEN ----------------
     L.append("## [COLD OPEN - 0:00]")
     L.append("")
-    L.append(f'**[ON SCREEN: the case summary, side by side with the {_display_variant(low_variant)} statement]**')
-    L.append("")
-    L.append(
-        f'"Same defendant. Same facts. Same statement to the court - except rewritten in {_display_variant(low_variant)}. '
-        f'`{sole_model}` recommended prison time in {baseline_pct:.0f}% of baseline responses. For the '
-        f'rewritten version, that drops to {low_rate*100:.0f}%."'
-    )
-    L.append("")
-    L.append("**[BEAT - let that number sit on screen]**")
-    L.append("")
-    L.append(
-        '"Not harsher. Lighter. That\'s backwards from what I went in expecting, and I\'m going to show you '
-        'exactly how I checked it wasn\'t a mistake."'
-    )
+    if sole_ranking.has_contrast and low_variant != "baseline":
+        low_display = _display_variant(low_variant)
+        hook, follow = _vary(experiment_id, "cold_open_contrast", [
+            (
+                f'"Same defendant. Same facts. Same statement to the court - except rewritten in {low_display}. '
+                f'`{sole_model}` recommended prison time in {baseline_pct:.0f}% of baseline responses. For the '
+                f'rewritten version, that drops to {low_rate*100:.0f}%."',
+                '"Not harsher. Lighter. That\'s backwards from what I went in expecting, and I\'m going to show you '
+                'exactly how I checked it wasn\'t a mistake."',
+            ),
+            (
+                f'"I kept this case completely identical and only changed how the defendant\'s own statement '
+                f'was phrased - rewritten in {low_display}. `{sole_model}`\'s custodial rate goes from '
+                f'{baseline_pct:.0f}% at baseline to {low_rate*100:.0f}% for that one version."',
+                '"That\'s the opposite of what I expected walking in - a lighter outcome, not a harsher one. '
+                'Before I call that a finding, I had to go try to break it."',
+            ),
+            (
+                f'"Nothing about this case changes except the statement itself, rewritten in {low_display}. '
+                f'`{sole_model}` goes from recommending custody {baseline_pct:.0f}% of the time at baseline '
+                f'down to {low_rate*100:.0f}% here - same facts, same defendant, different phrasing."',
+                '"Lighter, not harsher. That caught me off guard, so the rest of this video is me checking '
+                'whether it\'s real."',
+            ),
+            (
+                f'"Here\'s the case: unchanged. Here\'s what I rewrote: just the statement, into {low_display}. '
+                f'And here\'s what happened to `{sole_model}`\'s custodial rate: {baseline_pct:.0f}% at '
+                f'baseline, {low_rate*100:.0f}% after."',
+                '"That\'s backwards from what I expected going in - a lighter sentence, not a harsher one. I '
+                'spent the next few minutes trying to prove that wrong before trusting it."',
+            ),
+        ])
+        L.append(f'**[ON SCREEN: the case summary, side by side with the {low_display} statement]**')
+        L.append("")
+        L.append(hook)
+        L.append("")
+        L.append("**[BEAT - let that number sit on screen]**")
+        L.append("")
+        L.append(follow)
+    else:
+        hook, follow = _vary(experiment_id, "cold_open_no_contrast", [
+            (
+                f'"Same defendant. Same facts. Ten AI models. `{sole_model}` recommended prison time in '
+                f'{sole_overall_rate*100:.0f}% of its responses to this case - practically every time, no '
+                f'matter which version it saw. {len(silent_models)} other models never recommended it once. '
+                f'Not a close call. A flat no, every single time."',
+                '"So this was never really going to be a story about what changed in the prompt. It\'s a '
+                'story about what happens when you ask ten different AI tools the exact same question."',
+            ),
+            (
+                f'"Same defendant, same facts, ten different AI models. `{sole_model}` recommended prison '
+                f'time in {sole_overall_rate*100:.0f}% of its responses, no matter which version of the '
+                f'statement it got. {len(silent_models)} other models never recommended it a single time."',
+                '"So the variable that actually mattered here was never the prompt. It was which model you '
+                'asked."',
+            ),
+            (
+                f'"I showed the exact same invented case to ten AI models. One of them, `{sole_model}`, '
+                f'recommended prison time in {sole_overall_rate*100:.0f}% of its responses - almost '
+                f'regardless of which version it saw. The other {len(silent_models)} never recommended it '
+                f'once."',
+                '"Changing the statement barely moved the needle. Changing which model answered the '
+                'question did."',
+            ),
+        ])
+        L.append('**[ON SCREEN: the case summary and the per-model custodial-rate chart]**')
+        L.append("")
+        L.append(hook)
+        L.append("")
+        L.append("**[BEAT]**")
+        L.append("")
+        L.append(follow)
     L.append("")
 
     # ---------------- INTRO ----------------
     L.append("## [INTRO - METHODOLOGY]")
     L.append("")
-    L.append('"Here\'s the hypothesis I went in with:"')
+    L.append(_vary(experiment_id, "hypothesis_lead_in", [
+        '"Here\'s the hypothesis I went in with:"',
+        '"This is the hypothesis I set out to test:"',
+        '"Before any of that, here\'s what I was actually trying to find out:"',
+    ]))
     L.append("")
     L.append(f"> {experiment['hypothesis'] or '(no hypothesis recorded)'}")
     L.append("")
-    L.append(
+    L.append(_vary(experiment_id, "methodology_paragraph", [
         '"Police forces and courts are already piloting AI tools in case triage and sentencing support, so '
         'this isn\'t hypothetical. I built one invented case - a burglary, no violence, a guilty plea, no '
         'previous convictions - and changed exactly one thing at a time against a baseline: the '
         'defendant\'s name, or the dialect his own statement was rendered in. Never both at once, so a '
         'name effect and a dialect effect can never get blamed on each other. A second AI model, blind to '
         'the hypothesis, extracted a structured sentence and length from every response, and nothing '
-        'counts unless it can point to an exact quote in the response that backs it up."'
-    )
+        'counts unless it can point to an exact quote in the response that backs it up."',
+        '"This isn\'t a hypothetical - police forces and courts are already piloting AI tools in case '
+        'triage and sentencing support. So I built one invented case - burglary, no violence, a guilty '
+        'plea, no prior convictions - and changed exactly one variable at a time against a fixed baseline: '
+        'either the defendant\'s name, or the dialect of his own statement, never both together, so '
+        'neither effect can get blamed on the other. A second model, kept blind to what I was testing, '
+        'pulled a structured sentence and length out of every response - and nothing counts unless it can '
+        'quote the exact line that justifies it."',
+        '"AI tools are already being piloted in case triage and sentencing support by real police forces '
+        'and courts, so this question isn\'t academic. The case is invented - a burglary, no violence, a '
+        'guilty plea, no previous convictions - and only one thing changes at a time against the baseline: '
+        'the defendant\'s name, or the dialect his statement was written in, never both together. A '
+        'second, hypothesis-blind model extracts the sentence and length from every response, and it has '
+        'to cite an exact quote to back up what it extracted - or it doesn\'t count."',
+    ]))
     L.append("")
     intro_stats = f'"{counts.total} total calls, {counts.success} completed successfully'
     if counts.failed:
@@ -739,12 +852,18 @@ def generate_full_script(
     # ---------------- ACT 1: WHAT THE MODEL DID ----------------
     L.append(f"## [ACT 1 - WHAT `{sole_model.upper()}` ACTUALLY DID]")
     L.append("")
-    L.append(
+    minor_aside = _minor_models_sentence(minor_models, custodial_counts, experiment_id, "script_act1")
+    L.append(_vary(experiment_id, "act1_intro", [
         f'"{len(silent_models)} of the {n_models} models I tested never recommended custody once, in any '
         f'version of this case - their behaviour just didn\'t move, so this whole story is about one '
-        f'model.{_minor_models_sentence(minor_models, custodial_counts)} Here\'s its custodial rate, '
-        f'variant by variant:"'
-    )
+        f'model.{minor_aside} Here\'s its custodial rate, variant by variant:"',
+        f'"Out of {n_models} models tested, {len(silent_models)} never recommended custody once, in any '
+        f'version of this case - flat, unmoving, across the board. Which means this whole story comes '
+        f'down to one model.{minor_aside} Here\'s how its custodial rate broke down, variant by variant:"',
+        f'"{len(silent_models)} of the {n_models} models never once recommended custody, no matter which '
+        f'version of the case they saw - so whatever\'s interesting here lives entirely in one model\'s '
+        f'behaviour.{minor_aside} Variant by variant, here\'s its custodial rate:"',
+    ]))
     L.append("")
     for variant_name in ordered_variants:
         r = by_variant.loc[variant_name]
@@ -752,7 +871,9 @@ def generate_full_script(
                   f'{r["custodial_count"]:.0f} of {r["n"]:.0f}."')
     L.append("")
     baseline_quote = _pick_quote(df, "baseline", ["custodial", "suspended_custodial"], model_id=sole_model)
-    low_quote = _pick_quote(df, low_variant, ["community_order", "fine", "discharge"], model_id=sole_model)
+    show_contrast_quote = sole_ranking.has_contrast and low_variant != "baseline"
+    low_quote = _pick_quote(df, low_variant, ["community_order", "fine", "discharge"], model_id=sole_model) \
+        if show_contrast_quote else None
     if baseline_quote:
         L.append(f'**[ON SCREEN: real response from `{sole_model}`, baseline]**')
         L.append("")
@@ -763,58 +884,114 @@ def generate_full_script(
         L.append("")
         L.append(_blockquote(_truncate_at_word(low_quote["response"], 350)))
         L.append("")
-        L.append(
+        L.append(_vary(experiment_id, "quote_transition", [
             '"Read the aggravating and mitigating factors in both - on screen, side by side. They\'re '
             'nearly the same list, weighed the same way. The facts aren\'t being read differently. The '
-            'conclusion is."'
-        )
+            'conclusion is."',
+            '"Put the aggravating and mitigating factors from both responses side by side - they\'re '
+            'almost the same list, weighted almost the same way. What\'s different isn\'t how the facts '
+            'were read. It\'s what the model did with them afterward."',
+            '"Line up the reasoning from both responses and the aggravating and mitigating factors barely '
+            'differ. Same facts, same weighting - right up until the actual recommendation, which is '
+            'where the two responses part ways."',
+        ]))
+        L.append("")
+    elif baseline_quote and not show_contrast_quote:
+        L.append(_vary(experiment_id, "no_contrast_quote_note", [
+            f'"That\'s a typical response from `{sole_model}` on this case - and it looked almost '
+            f'identical no matter which version of the prompt it saw."',
+            f'"That\'s a representative response from `{sole_model}` - and swapping in any other version '
+            f'of the prompt barely changed it."',
+            f'"That\'s what a typical response from `{sole_model}` looks like on this case, and it stayed '
+            f'close to that no matter which variant of the prompt it was answering."',
+        ]))
         L.append("")
 
     # ---------------- ACT 2: THE CONFOUND CHECK ----------------
-    if "dialect_nigerian" in by_variant.index and "dialect_formal_control" in by_variant.index:
+    has_confound_check = "dialect_nigerian" in by_variant.index and "dialect_formal_control" in by_variant.index
+    if has_confound_check:
         nigerian_row = by_variant.loc["dialect_nigerian"]
         control_row = by_variant.loc["dialect_formal_control"]
         L.append("## [ACT 2 - CHECKING MY OWN FINDING]")
         L.append("")
-        L.append(
+        L.append(_vary(experiment_id, "confound_setup", [
             '"Before I trusted this number, I had to rule out the obvious alternative explanation: maybe '
             'the model isn\'t reacting to Nigerian English specifically - maybe it\'s just reacting to the '
             'statement sounding more formal, no contractions, a slightly stiffer register than the casual '
             'baseline. So I added one more version after the fact: same formal, no-contractions register '
-            'as the Nigerian-English statement, but with none of its actual Nigerian English grammar."'
-        )
+            'as the Nigerian-English statement, but with none of its actual Nigerian English grammar."',
+            '"Before trusting that number, I needed to rule out the obvious confound: maybe the model '
+            'isn\'t reacting to Nigerian English at all, just to the statement reading more formally - '
+            'fewer contractions, a stiffer register than the casual baseline. So I wrote one more version '
+            'to isolate that: the same formal, contraction-free register as the Nigerian-English '
+            'statement, with none of its actual Nigerian English grammar."',
+            '"One obvious objection I had to check before trusting this: maybe it\'s not Nigerian English '
+            'the model is reacting to, just a more formal, less contracted tone compared to the casual '
+            'baseline. So I added a control after the fact - same stiff, formal register as the '
+            'Nigerian-English statement, but written in plain standard English instead."',
+        ]))
         L.append("")
         control_gap = baseline_pct - control_row["custodial_pct"] if baseline_pct is not None else None
         if control_gap is not None and control_gap <= 2:
-            L.append(
-                f'"The formal control came back at {control_row["custodial_pct"]:.0f}% custodial - '
-                f'essentially identical to baseline, nowhere near Nigerian English\'s '
-                f'{nigerian_row["custodial_pct"]:.0f}%. Formality alone doesn\'t explain this. Whatever the '
-                f'model is reacting to is something more specific than just sounding more formal - that '
-                f'doesn\'t prove it\'s about nationality or ethnicity, but it rules out the simplest '
-                f'alternative."'
-            )
+            ctrl_pct, nig_pct = control_row["custodial_pct"], nigerian_row["custodial_pct"]
+            L.append(_vary(experiment_id, "confound_rules_out_formality", [
+                f'"The formal control came back at {ctrl_pct:.0f}% custodial - essentially identical to '
+                f'baseline, nowhere near Nigerian English\'s {nig_pct:.0f}%. Formality alone doesn\'t '
+                f'explain this. Whatever the model is reacting to is something more specific than just '
+                f'sounding more formal - that doesn\'t prove it\'s about nationality or ethnicity, but it '
+                f'rules out the simplest alternative."',
+                f'"The formal control landed at {ctrl_pct:.0f}% custodial - essentially the same as '
+                f'baseline, nowhere close to Nigerian English\'s {nig_pct:.0f}%. So formality alone '
+                f'doesn\'t explain this. Something more specific than register is driving it - that '
+                f'doesn\'t prove it\'s about nationality or ethnicity, but it does rule out the simplest '
+                f'alternative."',
+                f'"{ctrl_pct:.0f}% custodial for the formal control - basically indistinguishable from '
+                f'baseline, nowhere near Nigerian English\'s {nig_pct:.0f}%. Formality alone just '
+                f'doesn\'t explain this gap. Whatever the model is actually reacting to is more specific '
+                f'than tone - that\'s not proof it\'s about nationality or ethnicity, but it does take the '
+                f'simplest alternative explanation off the table."',
+            ]))
         elif control_gap is not None:
-            L.append(
-                f'"And here\'s an honest twist: the formal control ALSO dropped, to '
-                f'{control_row["custodial_pct"]:.0f}% custodial, against Nigerian English\'s '
-                f'{nigerian_row["custodial_pct"]:.0f}%. That changes the story - this may be a formality '
-                f'effect that the Nigerian statement happens to share, not something specific to Nigerian '
-                f'English or nationality. I\'m telling you this on camera because finding out you were '
-                f'wrong is part of doing this properly, not something to quietly edit out."'
-            )
+            ctrl_pct, nig_pct = control_row["custodial_pct"], nigerian_row["custodial_pct"]
+            L.append(_vary(experiment_id, "confound_confirms_formality", [
+                f'"And here\'s an honest twist: the formal control ALSO dropped, to {ctrl_pct:.0f}% '
+                f'custodial, against Nigerian English\'s {nig_pct:.0f}%. That changes the story - this '
+                f'may be a formality effect that the Nigerian statement happens to share, not something '
+                f'specific to Nigerian English or nationality. I\'m telling you this on camera because '
+                f'finding out you were wrong is part of doing this properly, not something to quietly '
+                f'edit out."',
+                f'"Here\'s an honest twist, though: the formal control ALSO dropped - to {ctrl_pct:.0f}% '
+                f'custodial, against Nigerian English\'s {nig_pct:.0f}%. That complicates the story: this '
+                f'might be a formality effect the Nigerian statement happens to share, not something '
+                f'specific to nationality or dialect. I\'m keeping this on camera because finding out you '
+                f'were wrong is part of doing this properly."',
+                f'"There\'s an honest twist here: the formal control ALSO dropped, landing at '
+                f'{ctrl_pct:.0f}% custodial against Nigerian English\'s {nig_pct:.0f}%. That reshapes the '
+                f'finding - it may be a formality effect the Nigerian statement just happens to share, '
+                f'rather than anything specific to dialect or nationality. Showing you this is the point '
+                f'of checking your own work instead of quietly editing it out."',
+            ]))
         L.append("")
 
     # ---------------- ACT 3: WHY NOT "AI SENTENCING BIAS" ----------------
     L.append('## [ACT 3 - WHY I\'M NOT CALLING THIS "AI SENTENCING BIAS"]')
     L.append("")
     silent_list = _prose_list([f"`{m}`" for m in silent_models])
-    L.append(
+    L.append(_vary(experiment_id, "act3_opening", [
         f'"Because it isn\'t, as a general claim. {silent_list} never once recommended custody for this '
         f'case, in any version. This entire finding belongs to one model. If I\'d only tested the other '
         f'{n_models - 1}, this video wouldn\'t exist - and that\'s exactly why testing the specific tool '
-        f'matters more than assuming every AI behaves the same way."'
-    )
+        f'matters more than assuming every AI behaves the same way."',
+        f'"Because it isn\'t - not as a general claim about AI. {silent_list} never once recommended '
+        f'custody for this case, in any version of it. This finding belongs to exactly one model. Test '
+        f'only the other {n_models - 1} and this video doesn\'t exist, which is the whole reason testing '
+        f'the specific tool beats assuming every model behaves the same."',
+        f'"It isn\'t, as a blanket statement about AI. {silent_list} never recommended custody for this '
+        f'case, not once, in any version. One model, and one model only, produced this entire finding. '
+        f'Leave it out of the test and swap in any of the other {n_models - 1}, and there\'s no video '
+        f'here - which is exactly the point: test the specific tool, don\'t assume it behaves like the '
+        f'others."',
+    ]))
     L.append("")
     if companion_experiment_id is not None:
         companion_paragraph = _companion_null_result_paragraph(conn, companion_experiment_id)
@@ -825,39 +1002,118 @@ def generate_full_script(
     # ---------------- LIMITATIONS ----------------
     L.append("## [WHAT THIS DOES AND DOESN'T PROVE]")
     L.append("")
-    L.append(
-        '"A few honest caveats. This is one invented case. The baseline, name-swap, and AAE variants all '
-        'sit at a ceiling for this model - meaning a smaller or opposite effect there can\'t be ruled out, '
-        'only the variants that actually moved off that ceiling tell you anything with confidence. And '
-        'repeated runs from the same model aren\'t fully independent samples - they share the same '
-        'underlying weights."'
-    )
+    if sole_ranking.has_contrast and low_variant != "baseline":
+        ceiling_variants = [v for v in ordered_variants if v != low_variant]
+        # _display_variant("baseline") already returns "the baseline" - don't
+        # prepend a second "The"/"the" article in front of the list, or a
+        # ceiling_variants set that includes baseline reads "The the baseline,
+        # a pure name swap...". ceiling_list is used mid-sentence as-is;
+        # ceiling_list_cap only for the variants that open a sentence with it.
+        ceiling_list = _prose_list([_display_variant(v) for v in ceiling_variants])
+        ceiling_list_cap = _capitalize_first(ceiling_list)
+        L.append(_vary(experiment_id, "limitations_contrast", [
+            f'"A few honest caveats. This is one invented case. {ceiling_list_cap} variants all sit at a '
+            f'ceiling for this model - meaning a smaller or opposite effect there can\'t be ruled out, only '
+            f'the variant that actually moved off that ceiling tells you anything with confidence. And '
+            f'repeated runs from the same model aren\'t fully independent samples - they share the same '
+            f'underlying weights."',
+            f'"A few caveats, honestly stated. This is one invented case. {ceiling_list_cap} variants all '
+            f'sat at a ceiling for this model, so a smaller or opposite effect there can\'t be ruled out - '
+            f'only the variant that actually moved off that ceiling tells you anything with real '
+            f'confidence. And repeated runs from the same model aren\'t independent samples; they come '
+            f'from the same underlying weights every time."',
+            f'"Some honest limits here. This is one invented case, and {ceiling_list} variants all '
+            f'sat at a ceiling for this model - a smaller or opposite effect in those conditions can\'t be '
+            f'ruled out, only the variant that actually broke off that ceiling tells you anything with '
+            f'confidence. Repeated runs from the same model aren\'t fully independent either, since they '
+            f'share the exact same weights."',
+        ]))
+    else:
+        low_r, high_r = sole_ranking.low_rate * 100, sole_ranking.high_rate * 100
+        L.append(_vary(experiment_id, "limitations_no_contrast", [
+            f'"A few honest caveats. This is one invented case, and `{sole_model}`\'s own rate barely '
+            f'moved across these variants - {low_r:.0f}% to {high_r:.0f}%, all within a handful of '
+            f'responses of each other. That gap is small enough to be noise, not a finding, which is '
+            f'exactly why the real story here is the gap between models, not between variants. And '
+            f'repeated runs from the same model aren\'t fully independent samples - they share the same '
+            f'underlying weights."',
+            f'"A few caveats. This is one invented case, and `{sole_model}`\'s rate barely moved at all '
+            f'across variants - {low_r:.0f}% to {high_r:.0f}%, close enough to be noise rather than a '
+            f'finding. That\'s exactly why the real story is the gap between models, not between '
+            f'variants. Repeated runs from the same model also aren\'t fully independent - they share '
+            f'identical underlying weights."',
+            f'"Some honest limits. This is one invented case, and `{sole_model}`\'s own custodial rate '
+            f'stayed essentially flat across every variant - {low_r:.0f}% to {high_r:.0f}%, small enough '
+            f'to be noise rather than signal. The real story here was always between models, not between '
+            f'variants. And repeated runs from one model aren\'t independent samples; they come from the '
+            f'same weights every time."',
+        ]))
     L.append("")
     if missing["evidence_insufficient"] > 0:
-        L.append(
-            f'"One more thing, because I want to show my work: {missing["evidence_insufficient"]} response(s) '
-            f'got excluded entirely during this - one model spent its whole token budget on hidden '
-            f'reasoning and came back with a handful of characters, sometimes literally nothing. I re-ran '
-            f'it at a much higher budget rather than let a broken response quietly count as a real answer; '
-            f'the clean re-run showed that model belongs with the silent majority, not a second hidden '
-            f'version of this finding."'
-        )
+        n_ei = missing["evidence_insufficient"]
+        L.append(_vary(experiment_id, "evidence_insufficient_aside", [
+            f'"One more thing, because I want to show my work: {n_ei} response(s) got excluded entirely '
+            f'during this - one model spent its whole token budget on hidden reasoning and came back '
+            f'with a handful of characters, sometimes literally nothing. I re-ran it at a much higher '
+            f'budget rather than let a broken response quietly count as a real answer; the clean re-run '
+            f'showed that model belongs with the silent majority, not a second hidden version of this '
+            f'finding."',
+            f'"One more thing worth showing, not just saying: {n_ei} response(s) got thrown out entirely '
+            f'- a model burned its whole token budget on hidden reasoning and came back with almost '
+            f'nothing, sometimes literally nothing. I re-ran it at a much higher budget rather than count '
+            f'a broken response as a real answer; the clean version confirmed that model belongs with '
+            f'the silent majority, not a second hidden result."',
+            f'"And one thing I won\'t skip past: {n_ei} response(s) were excluded entirely - one model '
+            f'spent its entire token budget on hidden reasoning and returned almost no actual text. '
+            f'Rather than let that count as a real answer, I re-ran it at a much higher budget; the clean '
+            f'result put that model right back with the silent majority, not inside this finding."',
+        ]))
         L.append("")
 
     # ---------------- CLOSING ----------------
     L.append("## [CLOSING - CALL TO ACTION]")
     L.append("")
-    L.append(
-        '"So: one model out of ten showed a real, repeatable effect - and it ran backwards from what '
-        'everyone, including me, would have guessed. That\'s not a verdict on \'AI\' in general. It\'s a '
-        'reason to actually test the specific tool before you trust it with a specific decision."'
-    )
+    if sole_ranking.has_contrast and low_variant != "baseline":
+        L.append(_vary(experiment_id, "closing_contrast", [
+            '"So: one model out of ten showed a real, repeatable effect - and it ran backwards from what '
+            'everyone, including me, would have guessed. That\'s not a verdict on \'AI\' in general. It\'s '
+            'a reason to actually test the specific tool before you trust it with a specific decision."',
+            '"One model out of ten showed a real, repeatable effect here - and it ran in the opposite '
+            'direction from what I, or probably you, would have guessed going in. That\'s not a verdict '
+            'on AI in general. It\'s a reason to test the specific tool you\'re relying on before you '
+            'trust it with a specific decision."',
+            '"So here\'s where this lands: one model out of ten, a real and repeatable effect, running '
+            'backwards from what anyone would have predicted beforehand. Not a verdict on AI as a '
+            'category - a reason to test the specific tool in front of you before trusting it with '
+            'anything that matters."',
+        ]))
+    else:
+        L.append(_vary(experiment_id, "closing_no_contrast", [
+            f'"So: whatever changed in this prompt made no real difference to `{sole_model}`, or to any '
+            f'of the other nine models. What made the difference was which model you asked. That\'s not a '
+            f'verdict on \'AI\' in general. It\'s a reason to actually test the specific tool before you '
+            f'trust it with a specific decision."',
+            f'"So: the prompt variant never really mattered here - not to `{sole_model}`, not to any of '
+            f'the other nine models. What mattered was which model answered. That\'s not a verdict on AI '
+            f'as a category. It\'s a reason to test the specific tool before you hand it a specific '
+            f'decision."',
+            f'"Here\'s the honest summary: changing the prompt made essentially no difference, to '
+            f'`{sole_model}` or to any of the other nine models tested. The only variable that actually '
+            f'moved the outcome was which model you picked. That\'s not a verdict on AI in general - it\'s '
+            f'a reason to test the specific tool before trusting it with anything specific."',
+        ]))
     L.append("")
-    L.append(
+    L.append(_vary(experiment_id, "final_cta", [
         '"Full dataset, every raw response, the exact evaluator prompt I used to score this fairly - all '
         'linked below, so you can check my work instead of just taking my word for it. If you want me to '
-        'run this on a different case, or test a specific model, tell me in the comments."'
-    )
+        'run this on a different case, or test a specific model, tell me in the comments."',
+        '"The full dataset, every raw response, the exact evaluator prompt I used - it\'s all linked '
+        'below, so you don\'t have to take my word for any of this. Want me to run a different case, or '
+        'test a specific model? Say so in the comments."',
+        '"Everything\'s linked below - the full dataset, every raw response, the evaluator prompt I used '
+        'to score this. Check it yourself instead of trusting me on it. If there\'s a different case or '
+        'model you want tested, tell me in the comments."',
+    ]))
     L.append("")
 
     # ---------------- PRODUCTION CHECKLIST ----------------
@@ -868,7 +1124,8 @@ def generate_full_script(
     L.append("- [ ] Record Human Review screen showing a real sentencing response + automated classification")
     L.append(f"- [ ] Record Results Dashboard with the custodial-rate chart for `{sole_model}`")
     L.append("- [ ] On-screen callouts for every quoted number above (use the exact n/% shown, not rounded further)")
-    L.append("- [ ] Side-by-side on-screen text comparison of the baseline and formal-control statements, to make the confound check visually obvious")
+    if has_confound_check:
+        L.append("- [ ] Side-by-side on-screen text comparison of the baseline and formal-control statements, to make the confound check visually obvious")
     L.append("- [ ] Link in description: full report, JSON archive, and (if public) the repo")
     L.append("")
 

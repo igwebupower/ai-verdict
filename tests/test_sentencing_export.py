@@ -313,6 +313,33 @@ def test_script_single_model_story_covers_cold_open_and_acts(db_path):
     assert export.word_count(script) > 50
 
 
+def test_script_cold_open_uses_the_dominant_models_own_ranking_not_the_pooled_one(db_path):
+    """Regression test for a real bug: with a minor second model present,
+    the POOLED custodial rate per variant can disagree with what the
+    dominant model itself did (a small, opposite-direction contribution
+    from the minor model is enough to flip which variant looks "lowest").
+    The cold open narrates what the dominant model did, so it must rank
+    variants using the dominant model's own rates, not the pooled ones -
+    otherwise it can claim a "drop" into a variant that model actually
+    scored HIGHER on. model-a (dominant) goes 90% -> 100% baseline ->
+    dialect_nigerian (no real within-model contrast); model-b (minor)
+    goes 20% -> 0%, which pulls the POOLED dialect_nigerian rate below
+    the pooled baseline rate even though model-a's own didn't drop."""
+    exp_id, baseline_id, nigerian_id = _make_experiment(db_path, repetitions=20)
+    _add_many(db_path, exp_id, baseline_id, "model-a", 20, 18)
+    _add_many(db_path, exp_id, nigerian_id, "model-a", 20, 20)
+    _add_many(db_path, exp_id, baseline_id, "model-b", 20, 4)
+    _add_many(db_path, exp_id, nigerian_id, "model-b", 20, 0)
+
+    with db.get_connection(db_path) as conn:
+        script = sentencing_export.generate_full_script(conn, exp_id)
+
+    assert "except rewritten in" not in script, \
+        "model-a's own rate didn't drop for any variant - there is no real contrast to narrate as a drop"
+    assert "Not harsher. Lighter." not in script
+    assert "90%" in script and "100%" in script
+
+
 def test_script_never_fabricates_custodial_rate_numbers(db_path):
     exp_id, baseline_id, nigerian_id = _make_experiment(db_path, repetitions=20)
     _add_many(db_path, exp_id, baseline_id, "model-a", 20, 18)

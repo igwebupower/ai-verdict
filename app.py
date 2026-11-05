@@ -82,10 +82,23 @@ else:
             runs = db.list_runs(conn, exp["id"])
             prompt_versions = db.list_prompt_versions(conn, exp["id"], latest_only=True)
             models = db.list_experiment_models(conn, exp["id"])
-        success = sum(1 for r in runs if r["status"] == "success")
-        failed = sum(1 for r in runs if r["status"] == "failed")
-        pending = sum(1 for r in runs if r["status"] in ("pending", "running"))
-        planned = runner.estimate_call_count(max(len(prompt_versions), 1), max(len(models), 1), exp["repetitions"])
+            if exp.get("evaluation_domain") == "pushback_benchmark":
+                trial_counts = {r["status"]: r["n"] for r in conn.execute(
+                    "SELECT status, COUNT(*) n FROM conversation_trials WHERE experiment_id = ? GROUP BY status",
+                    (exp["id"],),
+                )}
+            else:
+                trial_counts = None
+        if trial_counts is not None:
+            success = trial_counts.get("success", 0)
+            failed = trial_counts.get("failed", 0)
+            planned = len(prompt_versions) * len(models) * exp["repetitions"]
+            pending = max(planned - success - failed, 0)
+        else:
+            success = sum(1 for r in runs if r["status"] == "success")
+            failed = sum(1 for r in runs if r["status"] == "failed")
+            pending = sum(1 for r in runs if r["status"] in ("pending", "running"))
+            planned = runner.estimate_call_count(max(len(prompt_versions), 1), max(len(models), 1), exp["repetitions"])
 
         with st.container(border=True):
             c1, c2, c3 = st.columns([3, 2, 2])
@@ -99,7 +112,11 @@ else:
                 b1, b2, b3 = st.columns(3)
                 if b1.button("Open", key=f"open_{exp['id']}"):
                     st.session_state["selected_experiment_id"] = exp["id"]
-                    st.switch_page("pages/2_Run_Experiment.py")
+                    st.switch_page(
+                        "pages/9_Pushback_Benchmark.py"
+                        if exp.get("evaluation_domain") == "pushback_benchmark"
+                        else "pages/2_Run_Experiment.py"
+                    )
                 if b2.button("Duplicate", key=f"dup_{exp['id']}"):
                     with db.get_connection() as conn:
                         new_id = _duplicate_experiment(conn, exp["id"])
